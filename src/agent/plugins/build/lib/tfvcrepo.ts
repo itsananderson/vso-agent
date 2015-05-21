@@ -23,10 +23,19 @@ var success = function(ret) {
     return ret && ret.code  === 0;
 };
 
+
 function _tfCmdExecutor(ctx, options) {
     return function(cmd, args, callback) {
+        var quotedArg = function (arg) {
+            var quote = '"';
+            if (arg.indexOf('"') > -1) {
+                quote = '\'';
+            }
+            return quote + arg + quote;
+        }
+
         var getCmdline = function(cmd, arguments) {
-            return 'tf ' + cmd + ' ' + arguments.join(' ');
+            return 'tf ' + cmd + ' ' + arguments.map((a) => quotedArg(a)).join(' ');
         };
 
         var collectionArg = '-collection:' + options.collectionUri;
@@ -73,15 +82,13 @@ function _getWorkspaceFromXml(xmlNode) {
 }
 
 function _getWorkspace(tfCmdExecutor, workspaceName, callback) {
-    var hostname = require('os').hostname();
-    tfCmdExecutor('workspaces', ['-format:xml', '-computer:'+hostname], (ret) => {
+    tfCmdExecutor('workspaces', ['-format:xml'], (ret) => {
         var workspace = null;
 
         if (success(ret) && ret.output) {
             xr.read(ret.output, (err, res) => {
                 res.workspaces.workspace.each((i, ws) => { 
-                    if (ws.attributes()['name'] === workspaceName 
-                            && ws.attributes()['computer'] === hostname) {
+                    if (ws.attributes()['name'] === workspaceName) {
                          workspace = _getWorkspaceFromXml(ws); 
                     }
                 });
@@ -98,7 +105,7 @@ function _deleteWorkspace(tfCmdExecutor, workspace, callback) {
 }
 
 function _newWorkspace(tfCmdExecutor, workspace, callback) {
-    tfCmdExecutor("workspace", ['-new', '-permission:Public', workspace], callback);
+    tfCmdExecutor("workspace", ['-new', '-permission:Public', '-location:server', workspace], callback);
 }
 
 function _get(tfCmdExecutor, version, callback) {
@@ -122,7 +129,7 @@ function _unmapFolder(tfCmdExecutor, serverPath, workspace, callback) {
 }
 
 function _unshelve(tfCmdExecutor, shelveset, workspace, callback) {
-    tfCmdExecutor('unshelve', ['-recursive', '-format:detailed', '-workspace:' + workspace, '"'+shelveset+'"'], callback);
+    tfCmdExecutor('unshelve', ['-recursive', '-format:detailed', '-workspace:' + workspace, shelveset], callback);
 }
 
 function _undo(tfCmdExecutor, callback) {
@@ -133,9 +140,11 @@ export function getcode(ctx, options, callback) {
     ctx.verbose('cwd: ' + process.cwd());
     var tf = shell.which('tf');
     if (!tf) {
-        var msg = 'tf is not installed, please install Microsoft Team Explorer Everywhere Cross Platorm command-line client, and add it to PATH.';
-        ctx.error(msg);
-        callback(new Error(msg));
+        var msg = "Failed to invoke the Microsoft Team Explorer Everywhere 'tf' command.";
+        ctx.error("'tf' was not found. Please install the Microsoft Team Explorer Everywhere cross-platorm, command-line client and add 'tf' to the path.");
+        ctx.error("Please also accept its End User License Agreement by running 'tf eula'.");
+        ctx.error("See https://www.visualstudio.com/products/team-explorer-everywhere-vs.aspx");
+        callback(msg);
         return;
     }
 
