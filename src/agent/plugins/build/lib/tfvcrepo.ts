@@ -23,35 +23,54 @@ var success = function(ret) {
     return ret && ret.code  === 0;
 };
 
-
-function _tfCmdExecutor(ctx, options) {
-    return function(cmd, args, callback) {
-        var quotedArg = function (arg) {
-            var quote = '"';
-            if (arg.indexOf('"') > -1) {
-                quote = '\'';
-            }
-            return quote + arg + quote;
+var shellCmdExecutor = function (ctx, cmd, args: string[], callback) {
+    var quotedArg = function(arg) {
+        var quote = '"';
+        if (arg.indexOf('"') > -1) {
+            quote = '\'';
         }
+        return quote + arg + quote;
+    }
+        
+    var getQuotedArgs = function (arguments) {
+         return arguments.map((a) => quotedArg(a));
+    }    
+    
+    var getCmdline = function(cmd, arguments) {
+        return 'tf ' + cmd + ' ' + getQuotedArgs(arguments).join(' ');
+    };
+    
+    utilm
+       .exec(getCmdline(cmd, args))
+       .done(function (ret) {
+           callback(ret); 
+       });
+} 
 
-        var getCmdline = function(cmd, arguments) {
-            return 'tf ' + cmd + ' ' + arguments.map((a) => quotedArg(a)).join(' ');
-        };
+var ctxSpwanExecutor = function (ctx, cmd, args: string[], callback) {
+    /* hide running cmd since it contains login info */
+    var options = {
+        showRunningCmd: false
+    }
+    
+    ctx.util.spawn('tf', [cmd].concat(args), options, (err, code) => { 
+        var status =  (code === 0) ? ' succeeded' : ' failed'         
+        var output = (err) ? err.name : 'tf ' + cmd + status;
+        callback({code: code, output: output});
+    });
+}
 
+function _tfCmdExecutor(ctx, options, cmdRunner: (ctx, cmd, args: string[], callback) => any) {
+    return function(cmd, args, callback) {
         var collectionArg = '-collection:' + options.collectionUri;
         var loginArg = '-login:' + options.creds.username + ',' + options.creds.password; 
+        
         var arguments = args.concat([collectionArg, loginArg]);
-        var cmdline = getCmdline(cmd, arguments);
-
         var maskedArguments = args.concat([collectionArg, '-login:********']);
-        var maskedCmdline = getCmdline(cmd, maskedArguments);
-
-        ctx.info('[command]' + maskedCmdline);
-        utilm
-           .exec(cmdline)
-           .done(function (ret) {
-               callback(ret); 
-           });
+        
+        ctx.info('[command]tf ' + cmd + ' ' + maskedArguments.join(' '));
+        
+        cmdRunner(ctx, cmd, arguments, callback);
     };
 }
 
@@ -210,20 +229,26 @@ export function getcode(ctx, options, callback) {
             () => { if (successExt) {successExt(ret);} }, 
             callback);
     };
-
+    
     var workspace: Workspace;
     var localPaths: string[] = [];
-    var tfExecutor = _tfCmdExecutor(ctx, options);
     var workspaceName = options.workspace;
     var mappings = options.mappings;
     var changeSetVersion = options.version;
     var shelveSet = options.shelveset;
+    
+    // used to run short cmds and pipes the command stdout back, this is required for parsing workspaces
+    var tfShortCmdExecutor = _tfCmdExecutor(ctx, options, shellCmdExecutor);
+    
+    // used to run long running cmds and don't care about stdout, pipe stdout to console directly.
+    // also any nonzero return code from those cmds may fail the job
+    var tfLongCmdExecutor = _tfCmdExecutor(ctx, options, ctxSpwanExecutor);
 
     async.series([
         // get existing workspace
         function (complete) {
             ctx.section('Setup workspace');
-            _getWorkspace(tfExecutor, workspaceName, (ws) => {
+            _getWorkspace(tfShortCmdExecutor, workspaceName, (ws) => {
                 workspace = ws;
                 if (workspace) {
                     ctx.info("workspace " + workspace.name + " exists.");
@@ -249,7 +274,7 @@ export function getcode(ctx, options, callback) {
                             return;
                         }
 
-                        _deleteWorkspace(tfExecutor, workspaceName, (ret) => {
+                        _deleteWorkspace(tfShortCmdExecutor, workspaceName, (ret) => {
                             tfCmdHandler(ret, complete, "Failed to clean workspace: " + workspaceName, () => {
                                 ctx.info(workspaceName + ' deleted.');
                                 workspace = null;
@@ -268,7 +293,7 @@ export function getcode(ctx, options, callback) {
                 return;
             }
 
-            _newWorkspace(tfExecutor, workspaceName, (ret) => {
+            _newWorkspace(tfShortCmdExecutor, workspaceName, (ret) => {
                 workspace = {
                     name: workspaceName,
                     maps: [],
@@ -294,7 +319,7 @@ export function getcode(ctx, options, callback) {
             }
 
             async.forEachSeries(workspace.cloaks, (cloak, myCallback) => {
-                _decloakFolder(tfExecutor, cloak.serverPath, workspace.name, (ret) => {
+                _decloakFolder(tfShortCmdExecutor, cloak.serverPath, workspace.name, (ret) => {
                     tfCmdHandler(ret, myCallback, "Failed to decloak: " + cloak.serverPath);
                 });
             }, (err) => {
@@ -311,7 +336,7 @@ export function getcode(ctx, options, callback) {
             }
 
             async.forEachSeries(workspace.maps, (map, myCallback) => {
-                _unmapFolder(tfExecutor, map.serverPath, workspace.name, (ret) => {
+                _unmapFolder(tfShortCmdExecutor, map.serverPath, workspace.name, (ret) => {
                     tfCmdHandler(ret, myCallback, "Failed to remove mapping: " + map.serverPath);
                 });
             }, (err) => {
@@ -331,7 +356,7 @@ export function getcode(ctx, options, callback) {
                     createLocalPath(workspace, mapping['serverPath'], (localPath) => {
                         if (localPath) {
                             ctx.info('Mapping ' + mapping['serverPath'] + ' to ' + localPath);
-                            _mapFolder(tfExecutor, mapping['serverPath'], localPath, workspace.name, (ret) => {
+                            _mapFolder(tfShortCmdExecutor, mapping['serverPath'], localPath, workspace.name, (ret) => {
                                 tfCmdHandler(ret, myCallback, "Failed to create map: " + mapping['serverPath'], () => {
                                     localPaths.push(localPath);
                                 });
@@ -342,7 +367,7 @@ export function getcode(ctx, options, callback) {
                     });
                 } else if (mapping['mappingType'] === 'cloak') {
                     ctx.info('Cloaking ' + mapping['serverPath']);
-                    _cloakFolder(tfExecutor, mapping['serverPath'], workspace.name, (ret) => {
+                    _cloakFolder(tfShortCmdExecutor, mapping['serverPath'], workspace.name, (ret) => {
                         tfCmdHandler(ret, myCallback, "Failed to cloak: " + mapping['serverPath']);
                     });
                 }
@@ -357,13 +382,13 @@ export function getcode(ctx, options, callback) {
                 shell.pushd(localPath);
                 ctx.info('cwd: ' + process.cwd());
                 // first undo any pending changes introduced by any build
-                _undo(tfExecutor, (ret) => {
+                _undo(tfShortCmdExecutor, (ret) => {
                     // ignore return code, as the return is not 0 when there is nothing to undo
                     if (success(ret)) {
                         ctx.info(ret.output);
                     }
 
-                    _get(tfExecutor, changeSetVersion, (ret) => {
+                    _get(tfLongCmdExecutor, changeSetVersion, (ret) => {
                         shell.popd();
                         tfCmdHandler(ret, myCallback, "Failed to get files.");
                     });
@@ -375,7 +400,7 @@ export function getcode(ctx, options, callback) {
         function (complete) {
             if (shelveSet) {
                 ctx.info('Unshelving shelveset: '+shelveSet);
-                _unshelve(tfExecutor, shelveSet, workspace.name, (ret) => {
+                _unshelve(tfLongCmdExecutor, shelveSet, workspace.name, (ret) => {
                     tfCmdHandler(ret, complete, "Failed to unshelve shelveset: "+ shelveSet);
                 });
             } else {

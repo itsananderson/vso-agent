@@ -178,7 +178,8 @@ export class Utilities {
             cwd: process.cwd(),
             env: process.env,
             failOnStdErr: true,
-            failOnNonZeroRC: true
+            failOnNonZeroRC: true,
+            showRunningCmd: true
         };
 
         // write over specified options over default options (ops)
@@ -187,8 +188,10 @@ export class Utilities {
         }
 
         this.ctx.verbose('cwd: ' + ops.cwd);
-        this.ctx.verbose('args: ' + args.toString());
-        this.ctx.info('running: ' + name + ' ' + args.join(' '));
+        if (ops.showRunningCmd) {
+            this.ctx.verbose('args: ' + args.toString());
+            this.ctx.info('running: ' + name + ' ' + args.join(' '));
+        }
 
         var cp = require('child_process').spawn;
 
